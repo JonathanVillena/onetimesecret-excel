@@ -22,7 +22,7 @@ Pestañas **Correo 1** y **Correo 2**: asunto y cuerpo **con formato** (tablas, 
 
 - Escribe el correo en Outlook o Word, cópialo y pulsa **Pegar con formato**.
 - **Vista previa** lo abre en el navegador con datos de ejemplo.
-- Variables: `[Nombre]`, `[URL]`, `[Contraseña]`, `[Correo]` (también `{nombre}`, `{url}`…).
+- Variables: `[Nombre]`, `[URL]`, `[Contraseña]`, `[Correo]`, `[Ticket]` (también `{nombre}`, `{url}`…).
   Lo que no es variable, como `[Acción requerida]`, se deja igual.
 
 Se guarda en `config_correos.json` junto al programa (cópialo para llevar tus plantillas a otra PC).
@@ -41,6 +41,7 @@ Pestaña **Columnas del Excel**. Valores por defecto (`plantilla.xlsx`):
 | F | CC – correo 1 (opcional) |
 | G | Para – correo 2 (opcional; vacío = mismo que D) |
 | H | Estado (lo escribe el programa) |
+| I | Ticket de referencia (para `[Ticket]`) |
 
 Varios correos en una celda: sepáralos con `;` o `,`.
 

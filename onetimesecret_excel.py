@@ -9,7 +9,7 @@ programa y se guardan en "config_correos.json" junto a este archivo.
 Las columnas del Excel también se configuran en el programa.
 
 Variables para asunto y cuerpo:
-  [Nombre]  [URL]  [Contraseña]  [Correo]   (también {nombre} {url} ...)
+  [Nombre]  [URL]  [Contraseña]  [Correo]  [Ticket]   (también {nombre} {url} ...)
 
 Solo usa librerías que vienen con Python.
 """
@@ -65,6 +65,7 @@ COLUMNAS = [
     ("para2",  "Para - correo 2 (vacío = mismo que correo 1)", "G"),
     ("cc2",    "CC - correo 2 (opcional)",                   ""),
     ("estado", "Estado (lo escribe el programa)",            "H"),
+    ("ticket", "Ticket de referencia (para [Ticket])",       "I"),
 ]
 
 _ESTILO = "font-family:Calibri,Arial,sans-serif;font-size:11pt;color:#000000"
@@ -102,6 +103,7 @@ En otro correo recibirá la contraseña para abrir ese enlace.</p>
 <p><b>El flujo se cierra con la validación de la Notificación:</b><br>
 Con la primera transacción pagada después del cambio, verifiquen que su sistema validó la notificación y que la orden quedó como pagada.<br>
 Confírmenlo respondiendo a este correo, con todos en copia.</p>
+<p><b>TICKET REFERENCIA:</b> [Ticket]</p>
 <p>Quedamos atentos.</p>
 </body></html>"""
 
@@ -112,11 +114,30 @@ CUERPO2_DEFECTO = f"""<html><head><meta charset="utf-8"></head>
 <p>Comparto la contraseña correspondiente para acceder al Link de credenciales de producción enviadas en el correo principal:</p>
 <p><b>Contraseña:</b> [Contraseña]</p>
 <p>Por favor, cualquier consulta o comunicación relacionada deberá mantenerse exclusivamente en la línea principal de correo, copiando a todos los involucrados.</p>
+<p><b>TICKET REFERENCIA:</b> [Ticket]</p>
 <p>Saludos,</p>
 </body></html>"""
 
 DATOS_EJEMPLO = {"nombre": "Comercio Ejemplo SAC", "url": "https://us.onetimesecret.com/secret/EJEMPLO123",
-                 "clave": "Clave-Ejemplo-123", "correo": "contacto@ejemplo.com"}
+                 "clave": "Clave-Ejemplo-123", "correo": "contacto@ejemplo.com", "ticket": "NC123"}
+
+LINEA_TICKET = "<p><b>TICKET REFERENCIA:</b> [Ticket]</p>\n"
+
+
+def asegurar_ticket(html):
+    """Si la plantilla no tiene [Ticket], agrega la línea antes de la despedida."""
+    if any(_ALIAS.get(_normalizar(m.group(1) or m.group(2))) == "ticket" for m in _PATRON.finditer(html)):
+        return html
+    pos = None
+    for m in re.finditer(r"<(p|div)\b[^>]*>", html, re.I):
+        fin = html.find("</", m.end())
+        trozo = _normalizar(html[m.end():fin if fin > 0 else len(html)])
+        if any(p in trozo for p in ("saludos", "quedamos atentos", "atentamente", "cordialmente")):
+            pos = m.start()
+    if pos is None:
+        i = html.lower().rfind("</body")
+        pos = i if i >= 0 else len(html)
+    return html[:pos] + LINEA_TICKET + html[pos:]
 
 
 def config_defecto():
@@ -134,6 +155,7 @@ def cargar_config():
             guardada = json.load(f)
         for k in ("correo1", "correo2"):
             cfg[k].update(guardada.get(k, {}))
+            cfg[k]["html"] = asegurar_ticket(cfg[k]["html"])
         cfg["columnas"].update(guardada.get("columnas", {}))
     except FileNotFoundError:
         pass
@@ -427,6 +449,19 @@ def _propiedades(lista, cabecera):
 
 
 
+def rtf_con_html(html):
+    """Envuelve el HTML en RTF (\\fromhtml1), como hace Outlook, y lo empaqueta
+    en el formato 'RTF comprimido' de los .msg (variante sin comprimir 'MELA')."""
+    # Todo a ASCII: los caracteres especiales pasan a entidades HTML (&#233;)
+    seguro = html.encode("ascii", "xmlcharrefreplace").decode("ascii")
+    seguro = seguro.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+    seguro = seguro.replace("\r\n", "\n").replace("\n", "\\par\n")
+    rtf = ("{\\rtf1\\ansi\\ansicpg1252\\fromhtml1 \\deff0"
+           "{\\fonttbl{\\f0\\fswiss Arial;}}"
+           "{\\*\\htmltag1 " + seguro + "}}").encode("ascii")
+    return struct.pack("<IIII", len(rtf) + 12, len(rtf), 0x414C454D, 0) + rtf
+
+
 def crear_msg(ruta, para, cc, asunto, html):
     """Crea un borrador .msg (sin enviar) que Outlook abre listo para editar y enviar.
     para y cc son listas de direcciones."""
@@ -455,6 +490,8 @@ def crear_msg(ruta, para, cc, asunto, html):
         (0x0E03, _PT_TEXTO, "; ".join(cc)),
         (0x1000, _PT_TEXTO, html_a_texto(html)),
         (0x1013, _PT_BIN, html.encode("utf-8")),
+        (0x1009, _PT_BIN, rtf_con_html(html)),  # RTF con el HTML dentro (Outlook lo prefiere)
+        (0x0E1F, 0x000B, 1),               # el RTF está sincronizado con el cuerpo
         (0x1016, _PT_LONG, 3),             # el cuerpo principal es HTML
         (0x3FDE, _PT_LONG, 65001),         # HTML en UTF-8
         (0x3FFD, _PT_LONG, 65001),
@@ -532,6 +569,8 @@ _ALIAS = {
     "contrasena": "clave", "password": "clave", "clave": "clave", "frase": "clave",
     "frase de contrasena": "clave",
     "correo": "correo", "email": "correo", "mail": "correo",
+    "ticket": "ticket", "ticket referencia": "ticket", "referencia": "ticket", "nro ticket": "ticket",
+    "numero ticket": "ticket", "numero de ticket": "ticket", "n ticket": "ticket", "nc": "ticket",
 }
 
 # [ ... ] o { ... }, permitiendo etiquetas HTML dentro (Word suele partir las palabras)
@@ -735,7 +774,7 @@ class EditorPlantilla(ttk.Frame):
 
         ayuda = ("Cuerpo con formato: escribe el correo en Outlook o Word (tablas, negritas, colores), "
                  "selecciónalo todo, cópialo (Ctrl+C) y pulsa \"Pegar con formato\".\n"
-                 "Variables: [Nombre]  [URL]  [Contraseña]  [Correo]. "
+                 "Variables: [Nombre]  [URL]  [Contraseña]  [Correo]  [Ticket]. "
                  "Usa \"Vista previa\" para comprobar cómo queda.")
         ttk.Label(self, text=ayuda, wraplength=700, foreground="#444").grid(
             row=3, column=0, columnspan=2, sticky="w", pady=(10, 4))
@@ -1075,7 +1114,9 @@ class App(tk.Tk):
                         para1 = separar_correos(valor(r, "para1"))
                         nombre, clave = valor(r, "nombre"), valor(r, "clave")
                         datos = {"nombre": nombre, "url": valor(r, "enlace"), "clave": clave,
-                                 "correo": "; ".join(para1)}
+                                 "correo": "; ".join(para1), "ticket": valor(r, "ticket")}
+                        if not datos["ticket"]:
+                            self.escribir(f"Fila {r}: aviso, no tiene número de ticket.")
                         items.append({"fila": r, "n": 1, "para": para1, "cc": separar_correos(valor(r, "cc1")),
                                       "asunto": " ".join(rellenar(c1["asunto"], datos).split()),
                                       "html": rellenar(c1["html"], datos, es_html=True),

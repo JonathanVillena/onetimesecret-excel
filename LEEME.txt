@@ -4,7 +4,7 @@ EXCEL -> ONETIMESECRET + 2 CORREOS .MSG
 1. Abre onetimesecret_excel.py en VS Code y pulsa Run.
 2. Pestanas "Correo 1" y "Correo 2": revisa asunto y cuerpo.
    Para cambiar el formato: copia el correo desde Outlook/Word y pulsa "Pegar con formato".
-   Variables: [Nombre] [URL] [Contrasena] [Correo]
+   Variables: [Nombre] [URL] [Contrasena] [Correo] [Ticket]
 3. Pestana "Columnas del Excel": letra de cada columna (ej. contrasena en K).
 4. Pestana "Proceso": elige el Excel y pulsa Iniciar.
 5. Los .msg quedan en la carpeta "Correos" junto al Excel. Abre, agrega firma y envia.
