@@ -1,23 +1,11 @@
-EXCEL -> ONETIMESECRET
-======================
+EXCEL -> ONETIMESECRET + CORREOS .MSG
+=====================================
 
-REQUISITOS EN LA OTRA PC
-1. Python 3.10 o superior: https://www.python.org/downloads/
-   IMPORTANTE: durante la instalacion marca "Add Python to PATH".
-2. Google Chrome instalado.
+1. Abre onetimesecret_excel.py en VS Code y pulsa Run (o: python onetimesecret_excel.py).
+2. Pulsa "Buscar...", elige tu Excel (basado en plantilla.xlsx) y pulsa "Iniciar".
+3. Los correos quedan en la carpeta "Correos" junto al Excel.
+   Abre cada .msg en Outlook, agrega la firma y envia.
 
-PASOS
-1. Descomprime esta carpeta.
-2. Doble clic en instalar.bat (solo la primera vez, requiere internet).
-3. Doble clic en abrir_programa.bat.
-4. Pulsa "Buscar..." y elige tu Excel. Luego pulsa "Iniciar".
-
-FORMATO DEL EXCEL (ver ejemplo.xlsx)
-- Columna A: texto secreto
-- Columna B: frase de contrasena (puede ir vacia)
-- Columna C: aqui el programa escribe el enlace generado
-- La fila 1 puede ser encabezado (opcion marcada por defecto).
-
-NOTAS
-- Cierra el Excel antes de iniciar; el programa guarda despues de cada fila.
-- Los enlaces caducan a los 7 dias (valor por defecto de la pagina).
+HOJA "Datos":  A texto | B contrasena | C enlace (auto) | D correo | E nombre | F archivo .msg (auto)
+HOJA "Plantilla":  B1 asunto | B2 cuerpo
+Variables: {nombre} {correo} {url}
