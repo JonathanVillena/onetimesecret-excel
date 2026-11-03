@@ -5,9 +5,12 @@ Columna A: texto secreto
 Columna B: frase de contraseña
 Columna C: aquí se escribe el enlace generado
 """
+import json
 import threading
 import time
 import tkinter as tk
+import urllib.parse
+import urllib.request
 from tkinter import filedialog, messagebox, ttk
 
 import openpyxl
@@ -18,6 +21,39 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 URL = "https://onetimesecret.com/es"
+API = "https://us.onetimesecret.com/api/v1/share"
+SIETE_DIAS = 7 * 24 * 3600
+
+
+def crear_enlace_directo(texto, clave):
+    """Crea el secreto con la API de la página (no necesita navegador)."""
+    datos = {"secret": texto, "ttl": SIETE_DIAS}
+    if clave:
+        datos["passphrase"] = clave
+    req = urllib.request.Request(
+        API, data=urllib.parse.urlencode(datos).encode("utf-8"),
+        headers={"User-Agent": "Mozilla/5.0"}, method="POST")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        r = json.loads(resp.read().decode("utf-8"))
+    return f"https://us.onetimesecret.com/secret/{r['secret_key']}"
+
+
+def abrir_navegador(oculto):
+    """Abre Chrome; si no está, usa Edge."""
+    errores = []
+    for nombre in ("chrome", "edge"):
+        try:
+            if nombre == "chrome":
+                opts = Options()
+            else:
+                opts = webdriver.EdgeOptions()
+            if oculto:
+                opts.add_argument("--headless=new")
+            opts.add_argument("--window-size=1300,950")
+            return webdriver.Chrome(options=opts) if nombre == "chrome" else webdriver.Edge(options=opts)
+        except Exception as e:
+            errores.append(f"{nombre}: {str(e).splitlines()[0] if str(e) else type(e).__name__}")
+    raise RuntimeError("No se pudo abrir Chrome ni Edge.\n" + "\n".join(errores))
 
 
 def crear_enlace(driver, texto, clave):
@@ -52,13 +88,14 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Excel → OneTimeSecret")
-        self.geometry("680x480")
+        self.geometry("680x580")
         self.minsize(560, 400)
 
         self.ruta = tk.StringVar()
         self.encabezado = tk.BooleanVar(value=True)
         self.saltar_llenas = tk.BooleanVar(value=True)
         self.oculto = tk.BooleanVar(value=False)
+        self.modo = tk.StringVar(value="directo")
         self.detener = False
 
         marco = ttk.Frame(self, padding=12)
@@ -78,7 +115,12 @@ class App(tk.Tk):
                         variable=self.encabezado).pack(anchor="w")
         ttk.Checkbutton(opciones, text="Saltar filas que ya tienen enlace en la columna C",
                         variable=self.saltar_llenas).pack(anchor="w")
-        ttk.Checkbutton(opciones, text="Ocultar el navegador mientras trabaja",
+        ttk.Label(opciones, text="Método:").pack(anchor="w", pady=(6, 0))
+        ttk.Radiobutton(opciones, text="Directo, sin navegador (recomendado)",
+                        variable=self.modo, value="directo").pack(anchor="w")
+        ttk.Radiobutton(opciones, text="Usando el navegador (Chrome o Edge)",
+                        variable=self.modo, value="navegador").pack(anchor="w")
+        ttk.Checkbutton(opciones, text="    Ocultar el navegador mientras trabaja",
                         variable=self.oculto).pack(anchor="w")
 
         botones = ttk.Frame(marco)
@@ -173,13 +215,10 @@ class App(tk.Tk):
                 return
 
             self.after(0, lambda: self.progreso.configure(maximum=len(filas), value=0))
-            self.escribir(f"Filas a procesar: {len(filas)}. Abriendo Chrome…")
-
-            opts = Options()
-            if self.oculto.get():
-                opts.add_argument("--headless=new")
-            opts.add_argument("--window-size=1300,950")
-            driver = webdriver.Chrome(options=opts)
+            self.escribir(f"Filas a procesar: {len(filas)}.")
+            if self.modo.get() == "navegador":
+                self.escribir("Abriendo el navegador…")
+                driver = abrir_navegador(self.oculto.get())
 
             hechas = 0
             for i, r in enumerate(filas, 1):
@@ -189,7 +228,10 @@ class App(tk.Tk):
                 clave = ws.cell(r, 2).value
                 clave = "" if clave is None else str(clave)
                 try:
-                    enlace = crear_enlace(driver, texto, clave)
+                    if driver:
+                        enlace = crear_enlace(driver, texto, clave)
+                    else:
+                        enlace = crear_enlace_directo(texto, clave)
                     ws.cell(r, 3).value = enlace
                     hechas += 1
                     self.escribir(f"Fila {r}: {enlace}")

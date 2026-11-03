@@ -10,11 +10,14 @@ Programa con ventana que lee un Excel y genera un enlace de [onetimesecret.com](
 
 Ver `ejemplo.xlsx`.
 
-## Descargar
+## Descargar (sin instalar nada) — recomendado
 
-Botón verde **Code → Download ZIP**, o en la pestaña **Releases**.
+1. Descarga: https://github.com/JonathanVillena/onetimesecret-excel/releases/latest/download/OneTimeSecretExcel-exe.zip
+2. Descomprime y haz doble clic en `OneTimeSecretExcel.exe`.
 
-## Requisitos
+No necesita Python ni Chrome. Usa el método **Directo, sin navegador** (viene marcado).
+
+## Usar desde el código (requiere Python)
 
 1. **Python 3.10+**: https://www.python.org/downloads/ (al instalar, marca **"Add Python to PATH"**).
 2. **Google Chrome**.
