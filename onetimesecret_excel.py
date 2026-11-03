@@ -4,16 +4,23 @@ Genera enlaces de OneTimeSecret a partir de un Excel.
 Columna A: texto secreto
 Columna B: frase de contraseña
 Columna C: aquí se escribe el enlace generado
+
+Solo usa librerías que vienen con Python (no necesita openpyxl).
 """
 import json
+import os
+import posixpath
+import re
+import tempfile
 import threading
 import time
 import tkinter as tk
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
 from tkinter import filedialog, messagebox, ttk
-
-import openpyxl
+from xml.sax.saxutils import escape
 
 # selenium solo hace falta para el modo "navegador"
 try:
@@ -29,6 +36,145 @@ except ImportError:
 URL = "https://onetimesecret.com/es"
 API = "https://us.onetimesecret.com/api/v1/share"
 SIETE_DIAS = 7 * 24 * 3600
+
+
+def numero_columna(letras):
+    n = 0
+    for ch in letras:
+        n = n * 26 + ord(ch) - 64
+    return n
+
+
+def letras_columna(n):
+    s = ""
+    while n:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+class LibroExcel:
+    """Lee y escribe un .xlsx usando solo zipfile y xml (sin openpyxl)."""
+
+    def __init__(self, ruta):
+        self.ruta = ruta
+        with zipfile.ZipFile(ruta) as z:
+            self.infos = z.infolist()
+            self.archivos = {i.filename: z.read(i.filename) for i in self.infos}
+
+        wb = ET.fromstring(self.archivos["xl/workbook.xml"])
+        ns = wb.tag.split("}")[0] + "}"
+        rels = ET.fromstring(self.archivos["xl/_rels/workbook.xml.rels"])
+        destinos = {r.get("Id"): r.get("Target") for r in rels}
+        self.hojas = {}
+        for s in wb.iter(ns + "sheet"):
+            rid = next(v for k, v in s.attrib.items() if k.endswith("}id"))
+            t = destinos[rid]
+            ruta_hoja = t.lstrip("/") if t.startswith("/") else posixpath.normpath(posixpath.join("xl", t))
+            self.hojas[s.get("name")] = ruta_hoja
+        self.nombres = list(self.hojas)
+
+        self.compartidos = []
+        if "xl/sharedStrings.xml" in self.archivos:
+            sst = ET.fromstring(self.archivos["xl/sharedStrings.xml"])
+            m = sst.tag.split("}")[0] + "}"
+            for si in sst.findall(m + "si"):
+                partes = si.findall(m + "t") + [t for r in si.findall(m + "r") for t in r.findall(m + "t")]
+                self.compartidos.append("".join(t.text or "" for t in partes))
+
+    def abrir_hoja(self, nombre):
+        self.ruta_hoja = self.hojas[nombre]
+        self.xml = self.archivos[self.ruta_hoja].decode("utf-8")
+        p = re.search(r"<(\w+:)?worksheet\b", self.xml)
+        self.p = (p.group(1) or "") if p else ""
+
+        raiz = ET.fromstring(self.archivos[self.ruta_hoja])
+        m = raiz.tag.split("}")[0] + "}"
+        self.valores = {}
+        self.max_fila = 0
+        fila = 0
+        for row in raiz.iter(m + "row"):
+            fila = int(row.get("r")) if row.get("r") else fila + 1
+            self.max_fila = max(self.max_fila, fila)
+            col = 0
+            for c in row.findall(m + "c"):
+                ref = c.get("r")
+                col = numero_columna(re.match(r"[A-Z]+", ref).group()) if ref else col + 1
+                if col > 3:
+                    continue
+                tipo = c.get("t")
+                v = c.find(m + "v")
+                if tipo == "s" and v is not None:
+                    valor = self.compartidos[int(v.text)]
+                elif tipo == "inlineStr":
+                    valor = "".join(t.text or "" for t in c.iter(m + "t"))
+                elif v is not None:
+                    valor = v.text
+                else:
+                    valor = None
+                if valor is not None and str(valor) != "":
+                    self.valores[(fila, col)] = valor
+
+    def celda(self, fila, col):
+        return self.valores.get((fila, col))
+
+    def poner_c(self, fila, texto):
+        """Escribe texto en la columna C de la fila indicada."""
+        p = re.escape(self.p)
+        fila_re = re.compile(rf'<{p}row\b(?P<attrs>[^>]*?\br="{fila}"[^>]*)(?<!/)>(?P<body>.*?)</{p}row>', re.S)
+        m = fila_re.search(self.xml)
+        if not m:
+            raise RuntimeError(f"No se encontró la fila {fila} en el archivo. "
+                               "Abre el Excel, guárdalo y vuelve a intentar.")
+        body = m.group("body")
+        celda_re = re.compile(rf'<{p}c\b[^>]*?\br="C{fila}"[^>]*?(?:/>|>.*?</{p}c>)', re.S)
+        vieja = celda_re.search(body)
+        estilo = ""
+        if vieja:
+            s = re.search(r'\bs="(\d+)"', vieja.group())
+            estilo = f' s="{s.group(1)}"' if s else ""
+        q = self.p
+        nueva = (f'<{q}c r="C{fila}"{estilo} t="inlineStr"><{q}is><{q}t>{escape(texto)}'
+                 f'</{q}t></{q}is></{q}c>')
+        if vieja:
+            body = body[:vieja.start()] + nueva + body[vieja.end():]
+        else:
+            pos = len(body)
+            for c in re.finditer(rf'<{p}c\b[^>]*?\br="([A-Z]+)\d+"', body):
+                if numero_columna(c.group(1)) > 3:
+                    pos = c.start()
+                    break
+            body = body[:pos] + nueva + body[pos:]
+        attrs = re.sub(r'\s+spans="[^"]*"', "", m.group("attrs"))
+        self.xml = self.xml[:m.start()] + f"<{q}row{attrs}>{body}</{q}row>" + self.xml[m.end():]
+
+        # Ajustar el rango de la hoja para que incluya la columna C
+        def ajustar(d):
+            ref = d.group(2)
+            fin = ref.split(":")[-1]
+            mm = re.match(r"([A-Z]+)(\d+)", fin)
+            if not mm:
+                return d.group(0)
+            col = max(numero_columna(mm.group(1)), 3)
+            fil = max(int(mm.group(2)), fila)
+            ini = ref.split(":")[0] if ":" in ref else "A1"
+            return f'{d.group(1)}{ini}:{letras_columna(col)}{fil}"'
+        self.xml = re.sub(rf'(<{p}dimension\b[^>]*?\bref=")([^"]*)"', ajustar, self.xml, count=1)
+        self.valores[(fila, 3)] = texto
+
+    def guardar(self):
+        self.archivos[self.ruta_hoja] = self.xml.encode("utf-8")
+        carpeta = os.path.dirname(os.path.abspath(self.ruta))
+        fd, temporal = tempfile.mkstemp(suffix=".xlsx", dir=carpeta)
+        os.close(fd)
+        try:
+            with zipfile.ZipFile(temporal, "w") as z:
+                for info in self.infos:
+                    z.writestr(info, self.archivos[info.filename], compress_type=zipfile.ZIP_DEFLATED)
+            os.replace(temporal, self.ruta)
+        finally:
+            if os.path.exists(temporal):
+                os.remove(temporal)
 
 
 def crear_enlace_directo(texto, clave):
@@ -164,10 +310,9 @@ class App(tk.Tk):
             return
         self.ruta.set(ruta)
         try:
-            wb = openpyxl.load_workbook(ruta, read_only=True)
-            self.hoja["values"] = wb.sheetnames
-            self.hoja.set(wb.sheetnames[0])
-            wb.close()
+            nombres = LibroExcel(ruta).nombres
+            self.hoja["values"] = nombres
+            self.hoja.set(nombres[0])
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo abrir el archivo:\n{e}")
 
@@ -189,10 +334,10 @@ class App(tk.Tk):
         self.btn_detener.configure(state="disabled")
 
     # ---------- trabajo ----------
-    def guardar(self, wb, ruta):
+    def guardar(self, wb):
         while True:
             try:
-                wb.save(ruta)
+                wb.guardar()
                 return True
             except PermissionError:
                 ok = messagebox.askretrycancel(
@@ -206,16 +351,16 @@ class App(tk.Tk):
         ruta = self.ruta.get()
         driver = None
         try:
-            wb = openpyxl.load_workbook(ruta)
-            ws = wb[self.hoja.get()] if self.hoja.get() else wb.active
+            wb = LibroExcel(ruta)
+            wb.abrir_hoja(self.hoja.get() or wb.nombres[0])
             inicio = 2 if self.encabezado.get() else 1
 
             filas = []
-            for r in range(inicio, ws.max_row + 1):
-                texto = ws.cell(r, 1).value
+            for r in range(inicio, wb.max_fila + 1):
+                texto = wb.celda(r, 1)
                 if texto is None or str(texto).strip() == "":
                     continue
-                if self.saltar_llenas.get() and ws.cell(r, 3).value:
+                if self.saltar_llenas.get() and wb.celda(r, 3):
                     continue
                 filas.append(r)
 
@@ -233,18 +378,18 @@ class App(tk.Tk):
             for i, r in enumerate(filas, 1):
                 if self.detener:
                     break
-                texto = str(ws.cell(r, 1).value)
-                clave = ws.cell(r, 2).value
+                texto = str(wb.celda(r, 1))
+                clave = wb.celda(r, 2)
                 clave = "" if clave is None else str(clave)
                 try:
                     if driver:
                         enlace = crear_enlace(driver, texto, clave)
                     else:
                         enlace = crear_enlace_directo(texto, clave)
-                    ws.cell(r, 3).value = enlace
+                    wb.poner_c(r, enlace)
                     hechas += 1
                     self.escribir(f"Fila {r}: {enlace}")
-                    if not self.guardar(wb, ruta):
+                    if not self.guardar(wb):
                         self.escribir("Guardado cancelado. Se detiene el proceso.")
                         break
                 except Exception as e:

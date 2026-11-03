@@ -17,7 +17,12 @@ Ver `ejemplo.xlsx`.
 
 No necesita Python ni Chrome. Usa el método **Directo, sin navegador** (viene marcado).
 
-## Usar desde el código (requiere Python)
+## Usar desde el código (VS Code)
+
+Solo necesita Python; **no requiere instalar librerías** (no usa openpyxl).
+Descarga `onetimesecret_excel.py`, ábrelo en VS Code y pulsa ▶ (o `python onetimesecret_excel.py`).
+
+### Con los .bat
 
 1. **Python 3.10+**: https://www.python.org/downloads/ (al instalar, marca **"Add Python to PATH"**).
 2. **Google Chrome**.
