@@ -1,11 +1,12 @@
-EXCEL -> ONETIMESECRET + CORREOS .MSG
-=====================================
+EXCEL -> ONETIMESECRET + 2 CORREOS .MSG
+=======================================
 
-1. Abre onetimesecret_excel.py en VS Code y pulsa Run (o: python onetimesecret_excel.py).
-2. Pulsa "Buscar...", elige tu Excel (basado en plantilla.xlsx) y pulsa "Iniciar".
-3. Los correos quedan en la carpeta "Correos" junto al Excel.
-   Abre cada .msg en Outlook, agrega la firma y envia.
+1. Abre onetimesecret_excel.py en VS Code y pulsa Run.
+2. Pestanas "Correo 1" y "Correo 2": revisa asunto y cuerpo.
+   Para cambiar el formato: copia el correo desde Outlook/Word y pulsa "Pegar con formato".
+   Variables: [Nombre] [URL] [Contrasena] [Correo]
+3. Pestana "Columnas del Excel": letra de cada columna (ej. contrasena en K).
+4. Pestana "Proceso": elige el Excel y pulsa Iniciar.
+5. Los .msg quedan en la carpeta "Correos" junto al Excel. Abre, agrega firma y envia.
 
-HOJA "Datos":  A texto | B contrasena | C enlace (auto) | D correo | E nombre | F archivo .msg (auto)
-HOJA "Plantilla":  B1 asunto | B2 cuerpo
-Variables: {nombre} {correo} {url}
+Las plantillas se guardan en config_correos.json junto al programa.

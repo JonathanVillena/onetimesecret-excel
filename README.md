@@ -1,48 +1,52 @@
-# Excel → OneTimeSecret + correos .msg
+# Excel → OneTimeSecret + 2 correos .msg
 
 Programa con ventana que, a partir de un Excel:
 
-1. Crea un enlace de [onetimesecret.com](https://onetimesecret.com/es) por cada fila (texto + frase de contraseña).
-2. Genera un correo **.msg** por contacto, con el asunto y el cuerpo armados desde una plantilla.
-   Solo abres el .msg en Outlook, agregas tu firma y envías.
+1. Crea un enlace de [onetimesecret.com](https://onetimesecret.com/es) por fila (texto secreto + contraseña).
+2. Genera **2 correos .msg por fila**, listos para abrir en Outlook, agregar la firma y enviar:
+   - **Correo 1 – Credenciales:** lleva el enlace.
+   - **Correo 2 – Contraseña:** lleva la contraseña para abrir el enlace.
 
-No necesita instalar librerías: solo Python. No necesita Outlook para crear los .msg.
+Solo necesita Python (sin librerías). No necesita Outlook para crear los .msg.
 
-## Plantilla de Excel
+## Uso (VS Code)
 
-Descarga [`plantilla.xlsx`](plantilla.xlsx).
+1. Descarga [`onetimesecret_excel.py`](onetimesecret_excel.py) y [`plantilla.xlsx`](plantilla.xlsx).
+2. Abre el `.py` en VS Code y pulsa ▶ (o `python onetimesecret_excel.py`).
+3. Pestaña **Proceso**: elige el Excel y pulsa **Iniciar**.
+4. Los correos quedan en la carpeta `Correos`, junto al Excel.
 
-**Hoja `Datos`**
+## Plantillas de correo (en el programa)
 
-| Col | Contenido |
+Pestañas **Correo 1** y **Correo 2**: asunto y cuerpo **con formato** (tablas, negritas, colores).
+
+- Escribe el correo en Outlook o Word, cópialo y pulsa **Pegar con formato**.
+- **Vista previa** lo abre en el navegador con datos de ejemplo.
+- Variables: `[Nombre]`, `[URL]`, `[Contraseña]`, `[Correo]` (también `{nombre}`, `{url}`…).
+  Lo que no es variable, como `[Acción requerida]`, se deja igual.
+
+Se guarda en `config_correos.json` junto al programa (cópialo para llevar tus plantillas a otra PC).
+
+## Columnas del Excel (configurables)
+
+Pestaña **Columnas del Excel**. Valores por defecto (`plantilla.xlsx`):
+
+| Col | Dato |
 |---|---|
 | A | Texto secreto |
-| B | Frase de contraseña (puede ir vacía) |
+| B | Contraseña |
 | C | Enlace (lo escribe el programa) |
-| D | Correo del contacto |
-| E | Nombre del contacto |
-| F | Archivo .msg (lo escribe el programa) |
+| D | Para – correo 1 |
+| E | Nombre (para `[Nombre]`) |
+| F | CC – correo 1 (opcional) |
+| G | Para – correo 2 (opcional; vacío = mismo que D) |
+| H | Estado (lo escribe el programa) |
 
-**Hoja `Plantilla`**
-
-| Celda | Contenido |
-|---|---|
-| B1 | Asunto |
-| B2 | Cuerpo del correo (Alt+Enter para saltos de línea) |
-
-Variables que se reemplazan en asunto y cuerpo: `{nombre}`, `{correo}`, `{url}`.
-
-## Uso desde VS Code
-
-1. Descarga [`onetimesecret_excel.py`](onetimesecret_excel.py) y `plantilla.xlsx`.
-2. Abre el `.py` en VS Code y pulsa ▶ (o `python onetimesecret_excel.py`).
-3. Elige el Excel, marca lo que quieres hacer y pulsa **Iniciar**.
-
-Los correos quedan en la carpeta `Correos`, junto al Excel.
+Varios correos en una celda: sepáralos con `;` o `,`.
 
 ## Notas
 
 - Cierra el Excel antes de iniciar; el programa guarda en el mismo archivo.
 - Los enlaces caducan a los 7 días.
-- Con "Saltar filas ya procesadas" no se repiten enlaces ni correos; desmárcalo para volver a generar.
-- Opción "Crear los .msg con el Outlook instalado": usa Outlook (clásico) si está disponible.
+- Si una fila no tiene contraseña, solo se crea el correo 1.
+- "Saltar filas ya procesadas" evita repetir enlaces y correos.

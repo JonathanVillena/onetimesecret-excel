@@ -1,35 +1,38 @@
 """
-Genera enlaces de OneTimeSecret y correos .msg a partir de un Excel.
+Genera enlaces de OneTimeSecret y 2 correos .msg por fila a partir de un Excel.
 
-Hoja "Datos":
-  A: Texto secreto
-  B: Frase de contraseña
-  C: Enlace (lo escribe el programa)
-  D: Correo del contacto
-  E: Nombre del contacto
-  F: Archivo .msg (lo escribe el programa)
+  Correo 1: credenciales, con el enlace de OneTimeSecret.
+  Correo 2: la contraseña para abrir ese enlace.
 
-Hoja "Plantilla":
-  B1: Asunto      B2: Cuerpo del correo
-  Variables: {nombre}  {correo}  {url}
+Las plantillas de los correos (asunto y cuerpo con formato) se editan en el
+programa y se guardan en "config_correos.json" junto a este archivo.
+Las columnas del Excel también se configuran en el programa.
+
+Variables para asunto y cuerpo:
+  [Nombre]  [URL]  [Contraseña]  [Correo]   (también {nombre} {url} ...)
 
 Solo usa librerías que vienen con Python.
 """
 import base64
+import ctypes
+import html as htmlmod
 import json
 import os
 import posixpath
 import re
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import tkinter as tk
+import unicodedata
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
+from html.parser import HTMLParser
 from tkinter import filedialog, messagebox, ttk
 from xml.sax.saxutils import escape
 
@@ -48,17 +51,100 @@ URL = "https://onetimesecret.com/es"
 API = "https://us.onetimesecret.com/api/v1/share"
 SIETE_DIAS = 7 * 24 * 3600
 
-COL_TEXTO, COL_CLAVE, COL_ENLACE, COL_CORREO, COL_NOMBRE, COL_MSG = 1, 2, 3, 4, 5, 6
+CARPETA_PROGRAMA = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
+RUTA_CONFIG = os.path.join(CARPETA_PROGRAMA, "config_correos.json")
 
-ASUNTO_DEFECTO = "Información de acceso para {nombre}"
-CUERPO_DEFECTO = (
-    "Hola {nombre},\n\n"
-    "Te comparto la información de acceso en el siguiente enlace seguro:\n\n"
-    "{url}\n\n"
-    "El enlace solo puede abrirse una vez y caduca en 7 días.\n"
-    "La frase de contraseña para abrirlo te la enviaré por otro medio.\n\n"
-    "Saludos,"
-)
+# Columnas por defecto (letras). Vacío = no se usa.
+COLUMNAS = [
+    ("texto",  "Texto secreto (lo que va en OneTimeSecret)", "A"),
+    ("clave",  "Contraseña / frase de contraseña",           "B"),
+    ("enlace", "Enlace generado (lo escribe el programa)",   "C"),
+    ("para1",  "Para - correo 1 (credenciales)",             "D"),
+    ("nombre", "Nombre (para [Nombre])",                     "E"),
+    ("cc1",    "CC - correo 1 (opcional)",                   "F"),
+    ("para2",  "Para - correo 2 (vacío = mismo que correo 1)", "G"),
+    ("cc2",    "CC - correo 2 (opcional)",                   ""),
+    ("estado", "Estado (lo escribe el programa)",            "H"),
+]
+
+_ESTILO = "font-family:Calibri,Arial,sans-serif;font-size:11pt;color:#000000"
+_CELDA = "border:1px solid #808080;padding:6px 8px;vertical-align:top"
+
+ASUNTO1_DEFECTO = ("[Acción requerida] [Nombre] – Nuevas credenciales de producción "
+                   "y actualización del PeSignature")
+CUERPO1_DEFECTO = f"""<html><head><meta charset="utf-8"></head>
+<body style="{_ESTILO}">
+<p>Hola Equipo,</p>
+<p>Les compartimos las nuevas credenciales de producción.</p>
+<p><b><span style="color:#C00000">&#9888; ACCIÓN REQUERIDA:</span> las nuevas credenciales tienen 2 impactos</b></p>
+<table style="border-collapse:collapse;{_ESTILO}">
+<tr style="background:#1F4E78;color:#FFFFFF">
+<th style="{_CELDA};text-align:left">Módulo</th>
+<th style="{_CELDA};text-align:left">Qué cambiar</th>
+<th style="{_CELDA};text-align:left">Si no se configura</th>
+</tr>
+<tr>
+<td style="{_CELDA}"><b>1. Generación de pagos (CIP)</b></td>
+<td style="{_CELDA}">AccessKey y SecretKey</td>
+<td style="{_CELDA}">No podrán crear transacciones</td>
+</tr>
+<tr>
+<td style="{_CELDA}"><b>2. Servicio que recibe las notificaciones</b></td>
+<td style="{_CELDA}">SecretKey con la que calculan el PeSignature para validar cada notificación</td>
+<td style="{_CELDA}">El cliente realiza el pago, pero su sistema rechaza la notificación enviada por PagoEfectivo y la orden queda pendiente.</td>
+</tr>
+</table>
+<p>&nbsp;</p>
+<p><b>Para el responsable técnico.</b><br>
+A continuación, encontrará la url con las credenciales. El enlace vence en 7 días y solo puede abrirse una vez después de haber puesto la contraseña.</p>
+<p><b>One-Time Secret:</b> [URL]<br>
+En otro correo recibirá la contraseña para abrir ese enlace.</p>
+<p><b>El flujo se cierra con la validación de la Notificación:</b><br>
+Con la primera transacción pagada después del cambio, verifiquen que su sistema validó la notificación y que la orden quedó como pagada.<br>
+Confírmenlo respondiendo a este correo, con todos en copia.</p>
+<p>Quedamos atentos.</p>
+</body></html>"""
+
+ASUNTO2_DEFECTO = "[Nombre] – Contraseña del enlace de credenciales de producción"
+CUERPO2_DEFECTO = f"""<html><head><meta charset="utf-8"></head>
+<body style="{_ESTILO}">
+<p>Hola,</p>
+<p>Comparto la contraseña correspondiente para acceder al Link de credenciales de producción enviadas en el correo principal:</p>
+<p><b>Contraseña:</b> [Contraseña]</p>
+<p>Por favor, cualquier consulta o comunicación relacionada deberá mantenerse exclusivamente en la línea principal de correo, copiando a todos los involucrados.</p>
+<p>Saludos,</p>
+</body></html>"""
+
+DATOS_EJEMPLO = {"nombre": "Comercio Ejemplo SAC", "url": "https://us.onetimesecret.com/secret/EJEMPLO123",
+                 "clave": "Clave-Ejemplo-123", "correo": "contacto@ejemplo.com"}
+
+
+def config_defecto():
+    return {
+        "columnas": {k: v for k, _, v in COLUMNAS},
+        "correo1": {"asunto": ASUNTO1_DEFECTO, "html": CUERPO1_DEFECTO},
+        "correo2": {"asunto": ASUNTO2_DEFECTO, "html": CUERPO2_DEFECTO},
+    }
+
+
+def cargar_config():
+    cfg = config_defecto()
+    try:
+        with open(RUTA_CONFIG, encoding="utf-8") as f:
+            guardada = json.load(f)
+        for k in ("correo1", "correo2"):
+            cfg[k].update(guardada.get(k, {}))
+        cfg["columnas"].update(guardada.get("columnas", {}))
+    except FileNotFoundError:
+        pass
+    except Exception:
+        messagebox.showwarning("Configuración", "No se pudo leer config_correos.json; se usan los valores por defecto.")
+    return cfg
+
+
+def guardar_config(cfg):
+    with open(RUTA_CONFIG, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
 # ======================================================================
@@ -340,43 +426,50 @@ def _propiedades(lista, cabecera):
     return [{"nombre": "__properties_version1.0", "tipo": 2, "datos": bytes(flujo)}] + nodos
 
 
-def crear_msg(ruta, para, nombre, asunto, texto, html):
-    """Crea un borrador .msg (sin enviar) que Outlook abre listo para editar y enviar."""
-    nombre_mostrar = nombre or para
-    destinatario = _propiedades([
-        (0x0C15, _PT_LONG, 1),             # tipo: Para
-        (0x0FFE, _PT_LONG, 6),             # usuario de correo
-        (0x3900, _PT_LONG, 0),
-        (0x3000, _PT_LONG, 0),
-        (0x3001, _PT_TEXTO, nombre_mostrar),
-        (0x3002, _PT_TEXTO, "SMTP"),
-        (0x3003, _PT_TEXTO, para),
-        (0x39FE, _PT_TEXTO, para),
-        (0x5FF6, _PT_TEXTO, nombre_mostrar),
-    ], b"\0" * 8)
+
+def crear_msg(ruta, para, cc, asunto, html):
+    """Crea un borrador .msg (sin enviar) que Outlook abre listo para editar y enviar.
+    para y cc son listas de direcciones."""
+    destinatarios = [(d, 1) for d in para] + [(d, 2) for d in cc]
+    nodos_recip = []
+    for i, (direccion, tipo) in enumerate(destinatarios):
+        props = _propiedades([
+            (0x0C15, _PT_LONG, tipo),          # 1 = Para, 2 = CC
+            (0x0FFE, _PT_LONG, 6),             # usuario de correo
+            (0x3900, _PT_LONG, 0),
+            (0x3000, _PT_LONG, i),
+            (0x3001, _PT_TEXTO, direccion),
+            (0x3002, _PT_TEXTO, "SMTP"),
+            (0x3003, _PT_TEXTO, direccion),
+            (0x39FE, _PT_TEXTO, direccion),
+            (0x5FF6, _PT_TEXTO, direccion),
+        ], b"\0" * 8)
+        nodos_recip.append({"nombre": f"__recip_version1.0_#{i:08X}", "tipo": 1, "hijos": props})
+    n = len(destinatarios)
     mensaje = _propiedades([
         (0x001A, _PT_TEXTO, "IPM.Note"),
         (0x0037, _PT_TEXTO, asunto),
         (0x0E1D, _PT_TEXTO, asunto),
         (0x0070, _PT_TEXTO, asunto),
-        (0x0E04, _PT_TEXTO, nombre_mostrar),
-        (0x1000, _PT_TEXTO, texto),
+        (0x0E04, _PT_TEXTO, "; ".join(para)),
+        (0x0E03, _PT_TEXTO, "; ".join(cc)),
+        (0x1000, _PT_TEXTO, html_a_texto(html)),
         (0x1013, _PT_BIN, html.encode("utf-8")),
+        (0x1016, _PT_LONG, 3),             # el cuerpo principal es HTML
         (0x3FDE, _PT_LONG, 65001),         # HTML en UTF-8
         (0x3FFD, _PT_LONG, 65001),
         (0x0017, _PT_LONG, 1),             # importancia normal
         (0x0E07, _PT_LONG, 8),             # sin enviar (borrador)
         (0x340D, _PT_LONG, 0x00040000),    # admite Unicode
-    ], struct.pack("<8sIIII8s", b"\0" * 8, 1, 0, 1, 0, b"\0" * 8))
+    ], struct.pack("<8sIIII8s", b"\0" * 8, n, 0, n, 0, b"\0" * 8))
     nameid = {"nombre": "__nameid_version1.0", "tipo": 1, "hijos": [
         {"nombre": "__substg1.0_00020102", "tipo": 2, "datos": b""},
         {"nombre": "__substg1.0_00030102", "tipo": 2, "datos": b""},
         {"nombre": "__substg1.0_00040102", "tipo": 2, "datos": b""},
     ]}
-    recip = {"nombre": "__recip_version1.0_#00000000", "tipo": 1, "hijos": destinatario}
     clsid = bytes.fromhex("0B0D020000000000C000000000000046")
     with open(ruta, "wb") as f:
-        f.write(_cfb(mensaje + [nameid, recip], clsid))
+        f.write(_cfb(mensaje + [nameid] + nodos_recip, clsid))
 
 
 PS_OUTLOOK = r'''
@@ -390,6 +483,7 @@ foreach ($it in $items) {
   try {
     $m = $ol.CreateItem(0)
     $m.To = $it.para
+    if ($it.cc) { $m.CC = $it.cc }
     $m.Subject = $it.asunto
     $m.HTMLBody = $it.html
     $m.SaveAs($it.ruta, 9)
@@ -404,16 +498,18 @@ if (-not $abierto) { $ol.Quit() }
 
 def crear_msgs_con_outlook(items):
     """Crea los .msg usando el Outlook instalado. Devuelve {indice: error o None}."""
+    datos = [{"para": "; ".join(it["para"]), "cc": "; ".join(it["cc"]), "asunto": it["asunto"],
+              "html": it["html"], "ruta": it["ruta"]} for it in items]
     fd, ruta_json = tempfile.mkstemp(suffix=".json")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False)
+        json.dump(datos, f, ensure_ascii=False)
     try:
         cmd = base64.b64encode(PS_OUTLOOK.encode("utf-16-le")).decode()
         env = dict(os.environ, OTS_JSON=ruta_json)
         r = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", cmd],
             capture_output=True, text=True, encoding="utf-8", errors="replace", env=env,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=600)
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=900)
     finally:
         os.remove(ruta_json)
     resultado = {}
@@ -426,30 +522,136 @@ def crear_msgs_con_outlook(items):
     return resultado
 
 
-def rellenar(plantilla, datos):
-    """Reemplaza {nombre}, {correo}, {url} (sin importar mayúsculas)."""
+# ----------------------------------------------------------------------
+#  Plantillas: variables y formato
+# ----------------------------------------------------------------------
+_ALIAS = {
+    "nombre": "nombre", "name": "nombre", "comercio": "nombre", "empresa": "nombre", "cliente": "nombre",
+    "url": "url", "enlace": "url", "link": "url", "one time secret": "url", "one time secre": "url",
+    "onetimesecret": "url", "onetime secret": "url", "secret": "url",
+    "contrasena": "clave", "password": "clave", "clave": "clave", "frase": "clave",
+    "frase de contrasena": "clave",
+    "correo": "correo", "email": "correo", "mail": "correo",
+}
+
+# [ ... ] o { ... }, permitiendo etiquetas HTML dentro (Word suele partir las palabras)
+_PATRON = re.compile(r"\[((?:[^\[\]<>]|<[^>]*>){1,300}?)\]|\{((?:[^{}<>]|<[^>]*>){1,300}?)\}")
+
+
+def _normalizar(k):
+    k = re.sub(r"<[^>]*>", "", k)
+    k = htmlmod.unescape(k)
+    k = unicodedata.normalize("NFKD", k)
+    k = "".join(c for c in k if not unicodedata.combining(c))
+    return re.sub(r"[\s\-_:]+", " ", k.lower()).strip()
+
+
+def rellenar(plantilla, datos, es_html=False):
+    """Reemplaza [Nombre], [URL], [Contraseña], [Correo] (o {nombre}, ...).
+    Lo que no es una variable conocida, como [Acción requerida], se deja igual."""
     def cambio(m):
-        clave = m.group(1).lower()
-        return datos[clave] if clave in datos else m.group(0)
-    return re.sub(r"\{(\w+)\}", cambio, plantilla)
+        clave = _ALIAS.get(_normalizar(m.group(1) or m.group(2)))
+        if not clave:
+            return m.group(0)
+        valor = datos.get(clave, "")
+        if not es_html:
+            return valor
+        if clave == "url" and valor:
+            return f'<a href="{escape(valor, {chr(34): "&quot;"})}">{escape(valor)}</a>'
+        return escape(valor)
+
+    if not es_html:
+        return _PATRON.sub(cambio, plantilla)
+    # en HTML solo se reemplaza dentro del <body> (no en los estilos)
+    i = plantilla.lower().find("<body")
+    i = 0 if i < 0 else i
+    return plantilla[:i] + _PATRON.sub(cambio, plantilla[i:])
 
 
-def texto_a_html(texto):
-    partes = re.split(r"(https?://[^\s<>\"]+)", texto)
-    salida = []
-    for i, parte in enumerate(partes):
-        if i % 2:
-            salida.append(f'<a href="{escape(parte, {chr(34): "&quot;"})}">{escape(parte)}</a>')
-        else:
-            salida.append(escape(parte).replace("\n", "<br>\n"))
-    return ('<html><head><meta charset="utf-8"></head>'
-            '<body style="font-family:Calibri,Arial,sans-serif;font-size:11pt">'
-            + "".join(salida) + "</body></html>")
+class _HtmlATexto(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.partes, self.oculto = [], 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("style", "script", "head", "title"):
+            self.oculto += 1
+        elif tag == "br":
+            self.partes.append("\n")
+        elif tag in ("p", "div", "tr", "li", "table", "h1", "h2", "h3"):
+            self.partes.append("\n")
+        elif tag in ("td", "th"):
+            self.partes.append("\t")
+
+    def handle_endtag(self, tag):
+        if tag in ("style", "script", "head", "title"):
+            self.oculto = max(0, self.oculto - 1)
+        elif tag in ("p", "div", "table", "h1", "h2", "h3"):
+            self.partes.append("\n")
+
+    def handle_data(self, d):
+        if not self.oculto:
+            self.partes.append(re.sub(r"[ \t\r\n]+", " ", d))
 
 
-def nombre_archivo(fila, nombre, correo):
-    base = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", nombre or correo or "correo").strip(" .")[:60]
-    return f"{fila:03d} - {base}.msg"
+def html_a_texto(html):
+    p = _HtmlATexto()
+    p.feed(html)
+    lineas = [l.strip(" ") for l in "".join(p.partes).replace("\xa0", " ").split("\n")]
+    texto = "\n".join(lineas)
+    return re.sub(r"\n{3,}", "\n\n", texto).strip()
+
+
+def leer_html_portapapeles():
+    """Devuelve el HTML del portapapeles (lo que se copia de Outlook/Word/navegador) o None."""
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    user32.GetClipboardData.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalSize.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalSize.restype = ctypes.c_size_t
+    formato = user32.RegisterClipboardFormatW("HTML Format")
+    if not user32.OpenClipboard(None):
+        return None
+    try:
+        h = user32.GetClipboardData(formato)
+        if not h:
+            return None
+        p = kernel32.GlobalLock(h)
+        try:
+            datos = ctypes.string_at(p, kernel32.GlobalSize(h))
+        finally:
+            kernel32.GlobalUnlock(h)
+    finally:
+        user32.CloseClipboard()
+    datos = datos.split(b"\0")[0]
+    cab = datos[:400].decode("ascii", "ignore")
+    ini = re.search(r"StartHTML:(-?\d+)", cab)
+    fin = re.search(r"EndHTML:(-?\d+)", cab)
+    if ini and fin and int(ini.group(1)) >= 0:
+        datos = datos[int(ini.group(1)):int(fin.group(1))]
+    else:
+        ini = re.search(r"StartFragment:(\d+)", cab)
+        fin = re.search(r"EndFragment:(\d+)", cab)
+        if ini and fin:
+            datos = datos[int(ini.group(1)):int(fin.group(1))]
+    html = datos.decode("utf-8", "replace")
+    html = re.sub(r"<!--\s*(Start|End)Fragment\s*-->", "", html)
+    if "charset" not in html.lower()[:2000]:
+        html = '<meta charset="utf-8">' + html
+    return html
+
+
+def separar_correos(valor):
+    if not valor:
+        return []
+    return [d for d in re.split(r"[;,\s]+", str(valor)) if "@" in d]
+
+
+def nombre_archivo(fila, nombre, sufijo):
+    base = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", nombre or "correo").strip(" .")[:50]
+    return f"{fila:03d} - {base} - {sufijo}.msg"
 
 
 # ======================================================================
@@ -514,15 +716,98 @@ def crear_enlace(driver, texto, clave):
     return resultado.get_attribute("value")
 
 
+
+
 # ======================================================================
 #  Ventana
 # ======================================================================
+class EditorPlantilla(ttk.Frame):
+    """Pestaña para editar asunto y cuerpo (HTML con formato) de un correo."""
+
+    def __init__(self, padre, titulo, asunto_defecto, html_defecto):
+        super().__init__(padre, padding=10)
+        self.asunto_defecto, self.html_defecto = asunto_defecto, html_defecto
+        self.asunto = tk.StringVar()
+
+        ttk.Label(self, text=titulo, font=("Segoe UI", 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(self, text="Asunto:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(self, textvariable=self.asunto).grid(row=2, column=0, columnspan=2, sticky="ew")
+
+        ayuda = ("Cuerpo con formato: escribe el correo en Outlook o Word (tablas, negritas, colores), "
+                 "selecciónalo todo, cópialo (Ctrl+C) y pulsa \"Pegar con formato\".\n"
+                 "Variables: [Nombre]  [URL]  [Contraseña]  [Correo]. "
+                 "Usa \"Vista previa\" para comprobar cómo queda.")
+        ttk.Label(self, text=ayuda, wraplength=700, foreground="#444").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(10, 4))
+
+        botones = ttk.Frame(self)
+        botones.grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ttk.Button(botones, text="Pegar con formato", command=self.pegar).pack(side="left")
+        ttk.Button(botones, text="Vista previa", command=self.vista_previa).pack(side="left", padx=6)
+        ttk.Button(botones, text="Restaurar ejemplo", command=self.restaurar).pack(side="left")
+
+        ttk.Label(self, text="Código HTML del cuerpo (se puede editar a mano):").grid(row=5, column=0, sticky="w")
+        self.texto = tk.Text(self, wrap="word", font=("Consolas", 9), undo=True)
+        barra = ttk.Scrollbar(self, orient="vertical", command=self.texto.yview)
+        self.texto.configure(yscrollcommand=barra.set)
+        self.texto.grid(row=6, column=0, sticky="nsew")
+        barra.grid(row=6, column=1, sticky="ns")
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(6, weight=1)
+
+    def poner(self, asunto, html):
+        self.asunto.set(asunto)
+        self.texto.delete("1.0", "end")
+        self.texto.insert("1.0", html)
+
+    def obtener(self):
+        return {"asunto": self.asunto.get().strip(), "html": self.texto.get("1.0", "end-1c")}
+
+    def pegar(self):
+        try:
+            html = leer_html_portapapeles()
+        except Exception as e:
+            html = None
+            messagebox.showerror("Portapapeles", f"No se pudo leer el portapapeles:\n{e}")
+            return
+        if not html:
+            messagebox.showwarning(
+                "Sin formato", "El portapapeles no tiene texto con formato.\n"
+                "Copia el correo desde Outlook, Word o el navegador y vuelve a intentar.")
+            return
+        self.texto.delete("1.0", "end")
+        self.texto.insert("1.0", html)
+        messagebox.showinfo("Listo", "Cuerpo pegado con formato. Revisa la vista previa.")
+
+    def vista_previa(self):
+        d = self.obtener()
+        asunto = rellenar(d["asunto"], DATOS_EJEMPLO)
+        cuerpo = rellenar(d["html"], DATOS_EJEMPLO, es_html=True)
+        encabezado = (f'<div style="font-family:Segoe UI,Arial;font-size:10pt;background:#F2F2F2;'
+                      f'border-bottom:1px solid #CCC;padding:8px 12px;margin-bottom:12px">'
+                      f'<b>Vista previa (datos de ejemplo)</b><br>Asunto: {escape(asunto)}</div>')
+        i = cuerpo.lower().find("<body")
+        if i >= 0:
+            j = cuerpo.find(">", i) + 1
+            cuerpo = cuerpo[:j] + encabezado + cuerpo[j:]
+        else:
+            cuerpo = '<meta charset="utf-8">' + encabezado + cuerpo
+        ruta = os.path.join(tempfile.gettempdir(), f"vista_previa_{id(self)}.html")
+        with open(ruta, "w", encoding="utf-8") as f:
+            f.write(cuerpo)
+        os.startfile(ruta)
+
+    def restaurar(self):
+        if messagebox.askyesno("Restaurar", "¿Reemplazar el asunto y el cuerpo por el ejemplo original?"):
+            self.poner(self.asunto_defecto, self.html_defecto)
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Excel → OneTimeSecret")
-        self.geometry("720x680")
-        self.minsize(580, 500)
+        self.geometry("820x720")
+        self.minsize(640, 560)
 
         self.ruta = tk.StringVar()
         self.encabezado = tk.BooleanVar(value=True)
@@ -535,8 +820,12 @@ class App(tk.Tk):
         self.detener = False
         self.carpeta_correos = None
 
-        marco = ttk.Frame(self, padding=12)
-        marco.pack(fill="both", expand=True)
+        pestanas = ttk.Notebook(self)
+        pestanas.pack(fill="both", expand=True, padx=6, pady=6)
+
+        # ----- Pestaña Proceso -----
+        marco = ttk.Frame(pestanas, padding=12)
+        pestanas.add(marco, text="Proceso")
 
         ttk.Label(marco, text="Archivo Excel:").grid(row=0, column=0, sticky="w")
         ttk.Entry(marco, textvariable=self.ruta).grid(row=1, column=0, sticky="ew", padx=(0, 6))
@@ -549,13 +838,12 @@ class App(tk.Tk):
         op = ttk.Frame(marco)
         op.grid(row=4, column=0, columnspan=2, sticky="w", pady=8)
         ttk.Checkbutton(op, text="La primera fila es encabezado", variable=self.encabezado).pack(anchor="w")
-        ttk.Checkbutton(op, text="Saltar filas ya procesadas (enlace o correo ya generado)",
+        ttk.Checkbutton(op, text="Saltar filas ya procesadas (con enlace o con estado)",
                         variable=self.saltar_llenas).pack(anchor="w")
 
         ttk.Label(op, text="¿Qué hacer?", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(8, 0))
-        ttk.Checkbutton(op, text="Crear enlaces OneTimeSecret (columna C)",
-                        variable=self.hacer_enlaces).pack(anchor="w")
-        ttk.Checkbutton(op, text="Crear correos .msg (carpeta \"Correos\" junto al Excel)",
+        ttk.Checkbutton(op, text="Crear enlaces OneTimeSecret", variable=self.hacer_enlaces).pack(anchor="w")
+        ttk.Checkbutton(op, text="Crear los 2 correos .msg por fila (carpeta \"Correos\" junto al Excel)",
                         variable=self.hacer_correos).pack(anchor="w")
         ttk.Checkbutton(op, text="    Crear los .msg con el Outlook instalado (opcional)",
                         variable=self.usar_outlook).pack(anchor="w")
@@ -565,8 +853,7 @@ class App(tk.Tk):
                         variable=self.modo, value="directo").pack(anchor="w")
         ttk.Radiobutton(op, text="Usando el navegador (Chrome o Edge)",
                         variable=self.modo, value="navegador").pack(anchor="w")
-        ttk.Checkbutton(op, text="    Ocultar el navegador mientras trabaja",
-                        variable=self.oculto).pack(anchor="w")
+        ttk.Checkbutton(op, text="    Ocultar el navegador mientras trabaja", variable=self.oculto).pack(anchor="w")
 
         botones = ttk.Frame(marco)
         botones.grid(row=5, column=0, columnspan=2, sticky="w")
@@ -583,9 +870,60 @@ class App(tk.Tk):
 
         self.log = tk.Text(marco, height=10, state="disabled")
         self.log.grid(row=7, column=0, columnspan=2, sticky="nsew")
-
         marco.columnconfigure(0, weight=1)
         marco.rowconfigure(7, weight=1)
+
+        # ----- Pestañas de correos -----
+        self.editor1 = EditorPlantilla(pestanas, "Correo 1 – Credenciales (lleva el enlace [URL])",
+                                       ASUNTO1_DEFECTO, CUERPO1_DEFECTO)
+        self.editor2 = EditorPlantilla(pestanas, "Correo 2 – Contraseña (lleva [Contraseña])",
+                                       ASUNTO2_DEFECTO, CUERPO2_DEFECTO)
+        pestanas.add(self.editor1, text="Correo 1: credenciales")
+        pestanas.add(self.editor2, text="Correo 2: contraseña")
+
+        # ----- Pestaña Columnas -----
+        cols = ttk.Frame(pestanas, padding=12)
+        pestanas.add(cols, text="Columnas del Excel")
+        ttk.Label(cols, text="Escribe la letra de la columna del Excel para cada dato (A, B, … K). "
+                             "Deja vacío lo que no uses.", wraplength=700).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        self.vars_col = {}
+        for i, (clave, etiqueta, _) in enumerate(COLUMNAS, 1):
+            ttk.Label(cols, text=etiqueta + ":").grid(row=i, column=0, sticky="w", pady=2)
+            v = tk.StringVar()
+            ttk.Entry(cols, textvariable=v, width=6).grid(row=i, column=1, sticky="w", padx=8)
+            self.vars_col[clave] = v
+        ttk.Label(cols, text="En \"Para\" y \"CC\" se pueden poner varios correos separados por ; o ,",
+                  foreground="#444").grid(row=len(COLUMNAS) + 1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        ttk.Button(self, text="Guardar configuración", command=self.guardar_cfg).pack(side="right", padx=8, pady=(0, 8))
+        ttk.Label(self, text=f"Configuración: {RUTA_CONFIG}", foreground="#666").pack(side="left", padx=8, pady=(0, 8))
+
+        cfg = cargar_config()
+        self.editor1.poner(cfg["correo1"]["asunto"], cfg["correo1"]["html"])
+        self.editor2.poner(cfg["correo2"]["asunto"], cfg["correo2"]["html"])
+        for k, v in self.vars_col.items():
+            v.set(cfg["columnas"].get(k, ""))
+        self.protocol("WM_DELETE_WINDOW", self.cerrar)
+
+    # ---------- configuración ----------
+    def config_actual(self):
+        return {"columnas": {k: v.get().strip().upper() for k, v in self.vars_col.items()},
+                "correo1": self.editor1.obtener(), "correo2": self.editor2.obtener()}
+
+    def guardar_cfg(self, avisar=True):
+        try:
+            guardar_config(self.config_actual())
+            if avisar:
+                messagebox.showinfo("Guardado", "Configuración guardada.")
+            return True
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar la configuración:\n{e}")
+            return False
+
+    def cerrar(self):
+        self.guardar_cfg(avisar=False)
+        self.destroy()
 
     # ---------- interfaz ----------
     def escribir(self, msg):
@@ -603,9 +941,8 @@ class App(tk.Tk):
         self.ruta.set(ruta)
         try:
             nombres = LibroExcel(ruta).nombres
-            datos = [n for n in nombres if n.lower() != "plantilla"] or nombres
-            self.hoja["values"] = datos
-            self.hoja.set("Datos" if "Datos" in datos else datos[0])
+            self.hoja["values"] = nombres
+            self.hoja.set("Datos" if "Datos" in nombres else nombres[0])
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo abrir el archivo:\n{e}")
 
@@ -624,6 +961,20 @@ class App(tk.Tk):
         if not (self.hacer_enlaces.get() or self.hacer_correos.get()):
             messagebox.showwarning("Nada que hacer", "Marca al menos una opción en \"¿Qué hacer?\".")
             return
+        cfg = self.config_actual()
+        malas = [k for k, v in cfg["columnas"].items() if v and not re.fullmatch(r"[A-Z]{1,3}", v)]
+        faltan = [k for k in ("texto", "enlace", "para1", "estado") if not cfg["columnas"][k]]
+        if malas or faltan:
+            nombres = {k: e for k, e, _ in COLUMNAS}
+            msg = ""
+            if malas:
+                msg += "Letras no válidas en: " + ", ".join(nombres[k] for k in malas) + "\n"
+            if faltan:
+                msg += "Faltan columnas obligatorias: " + ", ".join(nombres[k] for k in faltan)
+            messagebox.showwarning("Columnas", msg + "\n\nRevisa la pestaña \"Columnas del Excel\".")
+            return
+        self.guardar_cfg(avisar=False)
+        self.cfg = cfg
         self.detener = False
         self.btn_iniciar.configure(state="disabled")
         self.btn_detener.configure(state="normal")
@@ -652,19 +1003,10 @@ class App(tk.Tk):
                 if not ok:
                     return False
 
-    def leer_plantilla(self, wb):
-        asunto, cuerpo = ASUNTO_DEFECTO, CUERPO_DEFECTO
-        hoja = next((n for n in wb.nombres if n.lower() == "plantilla"), None)
-        if hoja:
-            v, _ = wb.leer_hoja(hoja)
-            asunto = str(v.get((1, 2)) or asunto)
-            cuerpo = str(v.get((2, 2)) or cuerpo)
-        else:
-            self.escribir("No hay hoja \"Plantilla\"; se usa el asunto y cuerpo por defecto.")
-        return asunto.replace("\r\n", "\n").replace("\n", " ").strip(), cuerpo.replace("\r\n", "\n")
-
     def procesar(self):
         ruta = self.ruta.get()
+        cfg = self.cfg
+        col = {k: (numero_columna(v) if v else None) for k, v in cfg["columnas"].items()}
         driver = None
         try:
             wb = LibroExcel(ruta)
@@ -673,16 +1015,16 @@ class App(tk.Tk):
             saltar = self.saltar_llenas.get()
             todas = range(inicio, wb.max_fila + 1)
 
+            def valor(r, clave):
+                return (wb.celda(r, col[clave]) or "").strip() if col[clave] else ""
+
             filas_enlace = []
             if self.hacer_enlaces.get():
-                filas_enlace = [r for r in todas
-                                if (wb.celda(r, COL_TEXTO) or "").strip()
-                                and not (saltar and wb.celda(r, COL_ENLACE))]
+                filas_enlace = [r for r in todas if valor(r, "texto") and not (saltar and valor(r, "enlace"))]
 
             def filas_para_correo():
-                return [r for r in todas
-                        if wb.celda(r, COL_ENLACE) and (wb.celda(r, COL_CORREO) or "").strip()
-                        and not (saltar and wb.celda(r, COL_MSG))]
+                return [r for r in todas if valor(r, "enlace") and separar_correos(valor(r, "para1"))
+                        and not (saltar and valor(r, "estado"))]
 
             total = len(filas_enlace) + (len(filas_para_correo()) if self.hacer_correos.get() else 0)
             self.after(0, lambda: self.progreso.configure(maximum=max(total, 1), value=0))
@@ -698,11 +1040,10 @@ class App(tk.Tk):
                 for r in filas_enlace:
                     if self.detener:
                         break
-                    texto = wb.celda(r, COL_TEXTO)
-                    clave = wb.celda(r, COL_CLAVE) or ""
+                    texto, clave = valor(r, "texto"), valor(r, "clave")
                     try:
                         enlace = crear_enlace(driver, texto, clave) if driver else crear_enlace_directo(texto, clave)
-                        wb.poner(r, COL_ENLACE, enlace)
+                        wb.poner(r, col["enlace"], enlace)
                         enlaces_ok += 1
                         self.escribir(f"Fila {r}: enlace {enlace}")
                         if not self.guardar(wb):
@@ -721,28 +1062,36 @@ class App(tk.Tk):
             if self.hacer_correos.get() and not self.detener:
                 filas_correo = filas_para_correo()
                 if not filas_correo:
-                    self.escribir("No hay correos para crear (se necesita enlace en C y correo en D).")
+                    self.escribir("No hay correos para crear (se necesita enlace y correo \"Para\").")
                 else:
-                    asunto_t, cuerpo_t = self.leer_plantilla(wb)
                     carpeta = os.path.join(os.path.dirname(os.path.abspath(ruta)), "Correos")
                     os.makedirs(carpeta, exist_ok=True)
                     self.carpeta_correos = carpeta
-                    self.escribir(f"Correos a crear: {len(filas_correo)} en {carpeta}")
+                    self.escribir(f"Filas con correos a crear: {len(filas_correo)} → {carpeta}")
+                    c1, c2 = cfg["correo1"], cfg["correo2"]
 
                     items = []
                     for r in filas_correo:
-                        correo = wb.celda(r, COL_CORREO).strip()
-                        nombre = (wb.celda(r, COL_NOMBRE) or "").strip()
-                        datos = {"nombre": nombre, "correo": correo,
-                                 "url": wb.celda(r, COL_ENLACE), "enlace": wb.celda(r, COL_ENLACE)}
-                        cuerpo = rellenar(cuerpo_t, datos)
-                        archivo = nombre_archivo(r, nombre, correo)
-                        items.append({"fila": r, "para": correo, "nombre": nombre,
-                                      "asunto": rellenar(asunto_t, datos), "texto": cuerpo,
-                                      "html": texto_a_html(cuerpo), "archivo": archivo,
-                                      "ruta": os.path.join(carpeta, archivo)})
+                        para1 = separar_correos(valor(r, "para1"))
+                        nombre, clave = valor(r, "nombre"), valor(r, "clave")
+                        datos = {"nombre": nombre, "url": valor(r, "enlace"), "clave": clave,
+                                 "correo": "; ".join(para1)}
+                        items.append({"fila": r, "n": 1, "para": para1, "cc": separar_correos(valor(r, "cc1")),
+                                      "asunto": " ".join(rellenar(c1["asunto"], datos).split()),
+                                      "html": rellenar(c1["html"], datos, es_html=True),
+                                      "archivo": nombre_archivo(r, nombre, "1 Credenciales")})
+                        if clave:
+                            para2 = separar_correos(valor(r, "para2")) or para1
+                            items.append({"fila": r, "n": 2, "para": para2, "cc": separar_correos(valor(r, "cc2")),
+                                          "asunto": " ".join(rellenar(c2["asunto"], datos).split()),
+                                          "html": rellenar(c2["html"], datos, es_html=True),
+                                          "archivo": nombre_archivo(r, nombre, "2 Contraseña")})
+                        else:
+                            self.escribir(f"Fila {r}: sin contraseña, no se crea el correo 2.")
+                    for it in items:
+                        it["ruta"] = os.path.join(carpeta, it["archivo"])
 
-                    errores = {}
+                    errores = None
                     if self.usar_outlook.get():
                         self.escribir("Creando los .msg con Outlook…")
                         try:
@@ -750,37 +1099,47 @@ class App(tk.Tk):
                         except Exception as e:
                             self.escribir(f"{e}\nSe usará el método integrado.")
                             errores = None
-                    else:
-                        errores = None
 
+                    hechos = {}
                     for i, it in enumerate(items):
                         if self.detener:
                             break
                         try:
                             if errores is None:
-                                crear_msg(it["ruta"], it["para"], it["nombre"], it["asunto"], it["texto"], it["html"])
+                                crear_msg(it["ruta"], it["para"], it["cc"], it["asunto"], it["html"])
                             elif errores.get(i, "Outlook no respondió"):
                                 raise RuntimeError(errores.get(i, "Outlook no respondió"))
-                            wb.poner(it["fila"], COL_MSG, it["archivo"])
+                            hechos.setdefault(it["fila"], []).append(it["n"])
                             correos_ok += 1
-                            self.escribir(f"Fila {it['fila']}: correo {it['archivo']}")
+                            self.escribir(f"Fila {it['fila']}: {it['archivo']}")
                         except Exception as e:
-                            self.escribir(f"Fila {it['fila']}: ERROR correo - {e}")
-                        paso += 1
-                        self.avanzar(paso)
-                    if correos_ok and not self.guardar(wb):
-                        self.escribir("No se guardó la columna F en el Excel.")
+                            self.escribir(f"Fila {it['fila']}: ERROR correo {it['n']} - {e}")
+                        if it["n"] == 1:
+                            paso += 1
+                            self.avanzar(paso)
+
+                    for r, ns in hechos.items():
+                        if ns == [1, 2]:
+                            estado = "Correos 1 y 2 creados"
+                        elif ns == [1]:
+                            estado = "Solo correo 1 creado"
+                        else:
+                            estado = "Solo correo 2 creado"
+                        wb.poner(r, col["estado"], estado)
+                    if hechos and not self.guardar(wb):
+                        self.escribir("No se guardó la columna de estado en el Excel.")
 
             resumen = []
             if self.hacer_enlaces.get():
                 resumen.append(f"Enlaces creados: {enlaces_ok}")
             if self.hacer_correos.get():
-                resumen.append(f"Correos creados: {correos_ok}")
+                resumen.append(f"Correos .msg creados: {correos_ok}")
             self.escribir("Listo. " + " | ".join(resumen))
             self.after(0, lambda: messagebox.showinfo("Terminado", "\n".join(resumen)))
         except Exception as e:
-            self.escribir(f"ERROR: {e}")
-            self.after(0, lambda: messagebox.showerror("Error", str(e)))
+            texto_error = str(e)
+            self.escribir(f"ERROR: {texto_error}")
+            self.after(0, lambda: messagebox.showerror("Error", texto_error))
         finally:
             if driver:
                 driver.quit()
