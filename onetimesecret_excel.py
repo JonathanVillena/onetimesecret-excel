@@ -14,11 +14,17 @@ import urllib.request
 from tkinter import filedialog, messagebox, ttk
 
 import openpyxl
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+
+# selenium solo hace falta para el modo "navegador"
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.support.ui import WebDriverWait
+    HAY_SELENIUM = True
+except ImportError:
+    HAY_SELENIUM = False
 
 URL = "https://onetimesecret.com/es"
 API = "https://us.onetimesecret.com/api/v1/share"
@@ -40,6 +46,9 @@ def crear_enlace_directo(texto, clave):
 
 def abrir_navegador(oculto):
     """Abre Chrome; si no está, usa Edge."""
+    if not HAY_SELENIUM:
+        raise RuntimeError("El modo navegador necesita la librería selenium. "
+                           "Usa el modo 'Directo, sin navegador'.")
     errores = []
     for nombre in ("chrome", "edge"):
         try:
